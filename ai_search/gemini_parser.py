@@ -27,10 +27,32 @@ def _parse_response(response) -> ParsedSearchIntent:
     raise GeminiParseError("Gemini returned an empty response.")
 
 
+def _resolve_api_key(api_key: str | None = None) -> str:
+    if api_key and api_key.strip():
+        return api_key.strip()
+
+    env_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if env_key:
+        return env_key
+
+    try:
+        import streamlit as st
+
+        secret = st.secrets.get("GEMINI_API_KEY", "")
+        if secret:
+            return str(secret).strip()
+    except Exception:
+        pass
+
+    return ""
+
+
 def parse_search_intent(query: str, api_key: str | None = None) -> ParsedSearchIntent:
-    api_key = (api_key or os.environ.get("GEMINI_API_KEY", "")).strip()
+    api_key = _resolve_api_key(api_key)
     if not api_key:
-        raise GeminiParseError("Gemini API key is required. Set GEMINI_API_KEY in .env.")
+        raise GeminiParseError(
+            "Gemini API key is required. Set GEMINI_API_KEY in .env or Streamlit Secrets."
+        )
 
     client = genai.Client(api_key=api_key)
     models = [GEMINI_MODEL, *GEMINI_MODEL_FALLBACKS]
