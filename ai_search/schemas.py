@@ -52,20 +52,58 @@ def _is_half_bath(value: float) -> bool:
     return abs(value % 1 - 0.5) < 1e-9
 
 
+class LocationInquiry(BaseModel):
+    """One named place from the user query — resolved to an ID via typeahead, never by AI."""
+
+    name: str = Field(description="City, neighborhood, or zip name.")
+    location_type: Literal["city", "neighborhood", "zipcode"] | None = Field(
+        default=None,
+        description="Set when clearly a neighborhood vs city vs zip.",
+    )
+    parent_city: str | None = Field(
+        default=None,
+        description="Parent city for disambiguation, e.g. Chicago for Lincoln Park.",
+    )
+
+    @field_validator("name")
+    @classmethod
+    def normalize_name(cls, value: str) -> str:
+        return " ".join(value.strip().split())
+
+
 class ParsedSearchIntent(BaseModel):
     """Structured Gemini output — filters only, never location ids or URLs."""
 
     interpretation: str = Field(
         description="Plain-English summary of what the user wants and what was inferred from casual language.",
     )
-    location_text: str = Field(description="City, zip code, or neighborhood name from the query.")
+    search_mode: Literal["area", "address"] = Field(
+        default="area",
+        description="area = city/zip/neighborhood search; address = specific street address or property.",
+    )
+    address_line: str | None = Field(
+        default=None,
+        description="Street address when search_mode is address, e.g. 355 Pointing Rock Dr.",
+    )
+    locations: list[LocationInquiry] = Field(
+        default_factory=list,
+        description="One or more nearby cities/neighborhoods when user names multiple areas.",
+    )
+    location_text: str = Field(
+        default="",
+        description="Primary city or single location name. For multi-neighborhood, the parent city.",
+    )
     location_type: Literal["city", "neighborhood", "zipcode"] | None = Field(
         default=None,
-        description="Location type when clearly inferable from the query.",
+        description="Location type when clearly inferable from the query (single-location).",
     )
     state: str | None = Field(
         default=None,
         description="Two-letter US state code when mentioned or strongly implied.",
+    )
+    zip_code: str | None = Field(
+        default=None,
+        description="Five-digit zip when mentioned (especially useful for address mode).",
     )
     min_bedrooms: int | None = None
     max_bedrooms: int | None = None
@@ -94,6 +132,22 @@ class ParsedSearchIntent(BaseModel):
             return None
         value = value.strip().upper()
         return value if len(value) == 2 else None
+
+    @field_validator("zip_code")
+    @classmethod
+    def normalize_zip(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = "".join(ch for ch in value.strip() if ch.isdigit())
+        return cleaned if len(cleaned) == 5 else None
+
+    @field_validator("address_line")
+    @classmethod
+    def normalize_address_line(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = " ".join(value.strip().split())
+        return cleaned or None
 
     @field_validator(*_INT_FIELDS, mode="before")
     @classmethod
@@ -149,6 +203,23 @@ class ParsedSearchIntent(BaseModel):
         self.text = build_text_query_param(self.home_features, self.text)
         return self
 
+    @model_validator(mode="after")
+    def normalize_locations(self) -> "ParsedSearchIntent":
+        if not self.locations and self.location_text.strip():
+            self.locations = [
+                LocationInquiry(
+                    name=self.location_text.strip(),
+                    location_type=self.location_type,
+                )
+            ]
+        elif self.locations and not self.location_text.strip():
+            parent_cities = {loc.parent_city for loc in self.locations if loc.parent_city}
+            if len(parent_cities) == 1:
+                self.location_text = parent_cities.pop()
+            else:
+                self.location_text = self.locations[0].name
+        return self
+
 
 class ResolvedLocation(BaseModel):
     type: Literal["city", "neighborhood", "zipcode"]
@@ -156,3 +227,5 @@ class ResolvedLocation(BaseModel):
     state: str
     id: str
     parent_city: str | None = None
+    longitude: float | None = None
+    latitude: float | None = None
